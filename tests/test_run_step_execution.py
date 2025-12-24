@@ -63,6 +63,7 @@ from .utils.hitl import (
     make_context_wrapper,
     make_function_tool_call,
     make_shell_call,
+    reject_tool_call,
 )
 
 
@@ -574,3 +575,55 @@ async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback(
         and getattr(item.raw_item, "id", None) == "mcp-approval-2"
         for item in result.new_step_items
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_emits_hosted_mcp_rejection_response():
+    """Hosted MCP rejections without callbacks should emit approval responses."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-reject",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+    context_wrapper = make_context_wrapper()
+    reject_tool_call(context_wrapper, agent, request_item, tool_name="list_repo_languages")
+
+    result = await RunImpl.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=None,  # type: ignore[arg-type]
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    responses = [item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)]
+    assert responses, "Rejection should emit an MCP approval response."
+    assert responses[0].raw_item["approve"] is False
+    assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject"
+    assert not isinstance(result.next_step, NextStepInterruption)

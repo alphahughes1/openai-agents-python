@@ -2983,11 +2983,11 @@ def _collect_manual_mcp_approvals(
             tool_name, request_id or "", existing_pending=existing_pending
         )
 
-        if approval_status is True and request_id:
+        if approval_status is not None and request_id:
             approval_response_raw: McpApprovalResponse = {
                 "type": "mcp_approval_response",
                 "approval_request_id": request_id,
-                "approve": True,
+                "approve": approval_status,
             }
             approved.append(MCPApprovalResponseItem(raw_item=approval_response_raw, agent=agent))
             continue
