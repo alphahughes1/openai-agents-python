@@ -23,26 +23,34 @@ from agents import (
     function_tool,
 )
 from agents._run_impl import (
+    NextStepInterruption,
+    NextStepRunAgain,
     ProcessedResponse,
     RunImpl,
+    ToolRunFunction,
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
+    _extract_tool_call_id,
 )
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.items import (
     MCPApprovalResponseItem,
     MessageOutputItem,
     ModelResponse,
+    RunItem,
+    ToolCallOutputItem,
     TResponseOutputItem,
 )
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
 from agents.run_state import RunState as RunStateClass
+from agents.tool import HostedMCPTool
 from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
 from .utils.hitl import (
+    HITL_REJECTION_MSG,
     ApprovalScenario,
     PendingScenario,
     RecordingEditor,
@@ -727,3 +735,337 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     resumed = await Runner.run(orchestrator, state)
     assert resumed.interruptions, "Nested agent tool approval should bubble up"
     assert resumed.interruptions[0].tool_name == "get_current_timestamp"
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
+    """Resuming with only pending approvals should reconstruct and run function calls."""
+
+    @function_tool(needs_approval=True)
+    def approve_me(reason: str | None = None) -> str:
+        return f"approved:{reason}" if reason else "approved"
+
+    model, agent = make_model_and_agent(tools=[approve_me])
+    approval_raw = {
+        "type": "function_call",
+        "name": approve_me.name,
+        "call_id": "call-rebuild-1",
+        "arguments": '{"reason": "ok"}',
+        "status": "completed",
+    }
+    approval_item = ToolApprovalItem(agent=agent, raw_item=approval_raw)
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+
+    run_state = make_state_with_interruptions(agent, [approval_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption), (
+        "Approved function should run instead of requesting approval again"
+    )
+    executed_call_ids = {
+        _extract_tool_call_id(item.raw_item)
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+    }
+    assert "call-rebuild-1" in executed_call_ids, "Function should be rebuilt and executed"
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_non_hitl_function_calls() -> None:
+    """Non-HITL function calls should not re-run when resuming unrelated approvals."""
+
+    @function_tool
+    def already_ran() -> str:
+        return "done"
+
+    model, agent = make_model_and_agent(tools=[already_ran])
+    function_call = make_function_tool_call(already_ran.name, call_id="call-skip")
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[ToolRunFunction(tool_call=function_call, function_tool=already_ran)],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume run",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert not result.new_step_items, "Non-HITL tools should not be executed again on resume"
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_shell_calls_with_existing_output() -> None:
+    """Shell calls with persisted output should not execute a second time when resuming."""
+
+    shell_tool = ShellTool(executor=lambda _req: "should_not_run", needs_approval=True)
+    model, agent = make_model_and_agent(tools=[shell_tool])
+
+    shell_call = make_shell_call(
+        "call_shell_resume", id_value="shell_resume", commands=["echo done"], status="completed"
+    )
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool)],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    original_pre_step_items = [
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item=cast(
+                dict[str, Any],
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_shell_resume",
+                    "status": "completed",
+                    "output": "prior run",
+                },
+            ),
+            output="prior run",
+        )
+    ]
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume shell",
+        original_pre_step_items=cast(list[RunItem], original_pre_step_items),
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert not result.new_step_items, "Shell call should not run when output already exists"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
+    """Rebuilt function runs should surface pending approvals and emit rejections."""
+
+    @function_tool(needs_approval=True)
+    def reject_me(text: str = "nope") -> str:
+        return text
+
+    @function_tool(needs_approval=True)
+    def pending_me(text: str = "wait") -> str:
+        return text
+
+    _model, agent = make_model_and_agent(tools=[reject_me, pending_me])
+    context_wrapper = make_context_wrapper()
+
+    rejected_raw = {
+        "type": "function_call",
+        "name": reject_me.name,
+        "call_id": "call-reject",
+        "arguments": "{}",
+    }
+    pending_raw = {
+        "type": "function_call",
+        "name": pending_me.name,
+        "call_id": "call-pending",
+        "arguments": "{}",
+    }
+
+    rejected_item = ToolApprovalItem(agent=agent, raw_item=rejected_raw)
+    pending_item = ToolApprovalItem(agent=agent, raw_item=pending_raw)
+    context_wrapper.reject_tool(rejected_item)
+
+    run_state = make_state_with_interruptions(agent, [rejected_item, pending_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert pending_item in result.next_step.interruptions
+    rejection_outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem) and item.output == HITL_REJECTION_MSG
+    ]
+    assert rejection_outputs, "Rejected function call should emit rejection output"
+
+
+@pytest.mark.asyncio
+async def test_rejected_shell_calls_emit_rejection_output() -> None:
+    """Shell calls should produce rejection output when already denied."""
+
+    shell_tool = ShellTool(executor=lambda _req: "should_not_run", needs_approval=True)
+    _model, agent = make_model_and_agent(tools=[shell_tool])
+    context_wrapper = make_context_wrapper()
+
+    shell_call = make_shell_call(
+        "call_reject_shell", id_value="shell_reject", commands=["echo test"], status="in_progress"
+    )
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=cast(dict[str, Any], shell_call),
+        tool_name=shell_tool.name,
+    )
+    context_wrapper.reject_tool(approval_item)
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool)],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume shell rejection",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=make_state_with_interruptions(agent, [approval_item]),
+    )
+
+    rejection_outputs: list[ToolCallOutputItem] = []
+    for item in result.new_step_items:
+        if not isinstance(item, ToolCallOutputItem):
+            continue
+        raw = item.raw_item
+        if not isinstance(raw, dict) or raw.get("type") != "shell_call_output":
+            continue
+        output_value = cast(list[dict[str, Any]], raw.get("output") or [])
+        if not output_value:
+            continue
+        first_entry = output_value[0]
+        if first_entry.get("stderr") == HITL_REJECTION_MSG:
+            rejection_outputs.append(item)
+    assert rejection_outputs, "Rejected shell call should yield rejection output"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_mcp_callback_approvals_are_processed() -> None:
+    """MCP approval requests with callbacks should emit approval responses."""
+
+    agent = make_agent()
+    context_wrapper = make_context_wrapper()
+
+    class DummyMcpTool:
+        def __init__(self) -> None:
+            self.on_approval_request = lambda _req: {"approve": True, "reason": "ok"}
+
+    approval_request = ToolRunMCPApprovalRequest(
+        request_item=McpApprovalRequest(
+            id="mcp-callback-1",
+            type="mcp_approval_request",
+            server_label="server",
+            arguments="{}",
+            name="hosted_mcp",
+        ),
+        mcp_tool=cast(HostedMCPTool, DummyMcpTool()),
+    )
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[approval_request],
+        interruptions=[],
+    )
+
+    result = await RunImpl.resolve_interrupted_turn(
+        agent=agent,
+        original_input="handle mcp",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    assert any(
+        isinstance(item, MCPApprovalResponseItem) and item.raw_item.get("approve") is True
+        for item in result.new_step_items
+    ), "MCP callback approvals should emit approval responses"
+    assert isinstance(result.next_step, NextStepRunAgain)

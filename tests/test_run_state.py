@@ -1,5 +1,7 @@
 """Tests for RunState serialization, approval/rejection, and state management."""
 
+from __future__ import annotations
+
 import json
 from typing import Any, Callable, TypeVar, cast
 

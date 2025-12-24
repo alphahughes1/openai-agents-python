@@ -7,7 +7,7 @@ import dataclasses
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
-ContextOverride = Mapping[str, Any] | RunContextWrapper[Any]
+ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
 
 # Schema version for serialization compatibility
 CURRENT_SCHEMA_VERSION = "1.0"
@@ -95,7 +95,7 @@ _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(Computer
 _LOCAL_SHELL_OUTPUT_ADAPTER: TypeAdapter[LocalShellCallOutput] = TypeAdapter(LocalShellCallOutput)
 _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
     FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
-] = TypeAdapter(FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput)
+] = TypeAdapter(Union[FunctionCallOutput, ComputerCallOutput, LocalShellCallOutput])
 _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
