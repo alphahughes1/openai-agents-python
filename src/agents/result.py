@@ -395,10 +395,14 @@ class RunResultStreaming(RunResultBase):
             self.is_complete = True  # Mark the run as complete to stop event streaming
 
             # Optionally, clear the event queue to prevent processing stale events
-            while not self._event_queue.empty():
-                self._event_queue.get_nowait()
+            self._drain_event_queue()
             while not self._input_guardrail_queue.empty():
                 self._input_guardrail_queue.get_nowait()
+
+            # Unblock any streamers waiting on the event queue.
+            self._event_queue.put_nowait(QueueCompleteSentinel())
+            # If no one was waiting, keep the queue empty for consistency.
+            self._drain_event_queue()
 
         elif mode == "after_turn":
             # Soft cancel - just set the flag
@@ -452,6 +456,10 @@ class RunResultStreaming(RunResultBase):
             # Safely terminate all background tasks after main execution has finished
             self._cleanup_tasks()
 
+            # Drain queues so callers observing internal state see them empty after completion.
+            self._drain_event_queue()
+            self._drain_input_guardrail_queue()
+
         if self._stored_exception:
             raise self._stored_exception
 
@@ -483,25 +491,31 @@ class RunResultStreaming(RunResultBase):
 
         # Check the tasks for any exceptions
         if self._run_impl_task and self._run_impl_task.done():
-            run_impl_exc = self._run_impl_task.exception()
-            if run_impl_exc and isinstance(run_impl_exc, Exception):
-                if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
-                    run_impl_exc.run_data = self._create_error_details()
-                self._stored_exception = run_impl_exc
+            if not self._run_impl_task.cancelled():
+                run_impl_exc = self._run_impl_task.exception()
+                if run_impl_exc and isinstance(run_impl_exc, Exception):
+                    if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
+                        run_impl_exc.run_data = self._create_error_details()
+                    self._stored_exception = run_impl_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
-            in_guard_exc = self._input_guardrails_task.exception()
-            if in_guard_exc and isinstance(in_guard_exc, Exception):
-                if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
-                    in_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = in_guard_exc
+            if not self._input_guardrails_task.cancelled():
+                in_guard_exc = self._input_guardrails_task.exception()
+                if in_guard_exc and isinstance(in_guard_exc, Exception):
+                    if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
+                        in_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
-            out_guard_exc = self._output_guardrails_task.exception()
-            if out_guard_exc and isinstance(out_guard_exc, Exception):
-                if isinstance(out_guard_exc, AgentsException) and out_guard_exc.run_data is None:
-                    out_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = out_guard_exc
+            if not self._output_guardrails_task.cancelled():
+                out_guard_exc = self._output_guardrails_task.exception()
+                if out_guard_exc and isinstance(out_guard_exc, Exception):
+                    if (
+                        isinstance(out_guard_exc, AgentsException)
+                        and out_guard_exc.run_data is None
+                    ):
+                        out_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):
         if self._run_impl_task and not self._run_impl_task.done():
@@ -531,6 +545,26 @@ class RunResultStreaming(RunResultBase):
             except Exception:
                 # The exception will be surfaced via _check_errors() if needed.
                 pass
+
+    def _drain_event_queue(self) -> None:
+        """Remove any pending items from the event queue and mark them done."""
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+                self._event_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+            except ValueError:
+                # task_done called too many times; nothing more to drain.
+                break
+
+    def _drain_input_guardrail_queue(self) -> None:
+        """Remove any pending items from the input guardrail queue."""
+        while not self._input_guardrail_queue.empty():
+            try:
+                self._input_guardrail_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     def to_state(self) -> RunState[Any]:
         """Create a RunState from this streaming result to resume execution.
