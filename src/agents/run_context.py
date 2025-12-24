@@ -118,14 +118,7 @@ class RunContextWrapper(Generic[TContext]):
         # Reuse past rejections to avoid re-prompting when the model retries with a new call ID.
         if rejected_ids and not approved_ids:
             return False
-        # If there is any prior per-call approval for this tool and no explicit rejection
-        # for this call, consider it approved to avoid repeated prompts when the model
-        # regenerates a new call ID for the same tool during a resume.
-        rejected_is_permanent = (
-            isinstance(approval_entry.rejected, bool) and approval_entry.rejected
-        )
-        if approved_ids and not rejected_is_permanent and call_id not in rejected_ids:
-            return True
+        # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
         return None
 
     def _apply_approval_decision(

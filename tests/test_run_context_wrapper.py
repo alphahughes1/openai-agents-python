@@ -25,7 +25,7 @@ def test_run_context_resolve_tool_name_and_call_id_fallbacks() -> None:
     assert RunContextWrapper._resolve_call_id(item) == "raw-id"
 
 
-def test_run_context_reuses_prior_approvals() -> None:
+def test_run_context_scopes_approvals_to_call_ids() -> None:
     wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
     agent = make_agent()
     approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
@@ -33,11 +33,20 @@ def test_run_context_reuses_prior_approvals() -> None:
     wrapper.approve_tool(approval)
     assert wrapper.is_tool_approved("tool_call", "call-1") is True
 
-    # Approving one call should allow another for the same tool when no permanent rejection exists.
+    # A different call ID should require a fresh approval.
+    assert wrapper.is_tool_approved("tool_call", "call-2") is None
+
+
+def test_run_context_honors_global_approval_and_rejection() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+    approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
+
+    wrapper.approve_tool(approval, always_approve=True)
     assert wrapper.is_tool_approved("tool_call", "call-2") is True
 
     wrapper.reject_tool(approval, always_reject=True)
-    assert wrapper.is_tool_approved("tool_call", "call-2") is False
+    assert wrapper.is_tool_approved("tool_call", "call-3") is False
 
 
 def test_run_context_unknown_tool_name_fallback() -> None:
