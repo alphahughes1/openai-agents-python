@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, cast
+from typing import Any, Callable, Optional, cast
 
 import pytest
 from openai.types.responses.response_input_param import (
@@ -742,7 +742,7 @@ async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
     """Resuming with only pending approvals should reconstruct and run function calls."""
 
     @function_tool(needs_approval=True)
-    def approve_me(reason: str | None = None) -> str:
+    def approve_me(reason: Optional[str] = None) -> str:
         return f"approved:{reason}" if reason else "approved"
 
     model, agent = make_model_and_agent(tools=[approve_me])
