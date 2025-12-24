@@ -622,7 +622,9 @@ async def test_execute_tools_emits_hosted_mcp_rejection_response():
         run_config=RunConfig(),
     )
 
-    responses = [item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)]
+    responses = [
+        item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)
+    ]
     assert responses, "Rejection should emit an MCP approval response."
     assert responses[0].raw_item["approve"] is False
     assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject"

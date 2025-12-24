@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 TContext = TypeVar("TContext", default=Any)
 
 
-class ApprovalRecord:
+class _ApprovalRecord:
     """Tracks approval/rejection state for a tool.
 
     ``approved`` and ``rejected`` are either booleans (permanent allow/deny)
@@ -45,7 +45,7 @@ class RunContextWrapper(Generic[TContext]):
     last chunk of the stream is processed.
     """
 
-    _approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
+    _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     turn_input: list[TResponseInputItem] = field(default_factory=list)
 
     @staticmethod
@@ -80,10 +80,10 @@ class RunContextWrapper(Generic[TContext]):
             candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
         return RunContextWrapper._to_str_or_none(candidate)
 
-    def _get_or_create_approval_entry(self, tool_name: str) -> ApprovalRecord:
+    def _get_or_create_approval_entry(self, tool_name: str) -> _ApprovalRecord:
         approval_entry = self._approvals.get(tool_name)
         if approval_entry is None:
-            approval_entry = ApprovalRecord()
+            approval_entry = _ApprovalRecord()
             self._approvals[tool_name] = approval_entry
         return approval_entry
 
@@ -170,7 +170,7 @@ class RunContextWrapper(Generic[TContext]):
         """Restore approvals from serialized state."""
         self._approvals = {}
         for tool_name, record_dict in approvals.items():
-            record = ApprovalRecord()
+            record = _ApprovalRecord()
             record.approved = record_dict.get("approved", [])
             record.rejected = record_dict.get("rejected", [])
             self._approvals[tool_name] = record
