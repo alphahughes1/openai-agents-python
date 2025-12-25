@@ -1,5 +1,6 @@
 import atexit
 
+from .context import TraceCtxManager
 from .create import (
     agent_span,
     custom_span,
@@ -77,6 +78,7 @@ __all__ = [
     "speech_span",
     "transcription_span",
     "mcp_tools_span",
+    "TraceCtxManager",
 ]
 
 

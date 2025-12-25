@@ -1,4 +1,4 @@
-"""Unit tests for the ComputerAction methods in `agents._run_impl`.
+"""Unit tests for the ComputerAction methods in `agents.run_internal.run_loop`.
 
 These confirm that the correct computer action method is invoked for each action type and
 that screenshots are taken and wrapped appropriately, and that the execute function invokes
@@ -32,8 +32,9 @@ from agents import (
     RunContextWrapper,
     RunHooks,
 )
-from agents._run_impl import ComputerAction, RunImpl, ToolRunComputerAction
 from agents.items import ToolCallOutputItem
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
 from agents.tool import ComputerToolSafetyCheckData
 
 
@@ -337,7 +338,7 @@ async def test_pending_safety_check_acknowledged() -> None:
     agent = Agent(name="a", tools=[tool])
     ctx = RunContextWrapper(context=None)
 
-    results = await RunImpl.execute_computer_actions(
+    results = await run_loop.execute_computer_actions(
         agent=agent,
         actions=[run_action],
         hooks=RunHooks[Any](),

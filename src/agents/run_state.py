@@ -67,13 +67,13 @@ from .tool import (
 from .usage import deserialize_usage, serialize_usage
 
 if TYPE_CHECKING:
-    from ._run_impl import (
-        NextStepInterruption,
-        ProcessedResponse,
-    )
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
+    from .run_internal.run_steps import (
+        NextStepInterruption,
+        ProcessedResponse,
+    )
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
@@ -219,7 +219,7 @@ class RunState(Generic[TContext, TAgent]):
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
         # Import at runtime to avoid circular import
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
@@ -665,7 +665,7 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
         # Import at runtime to avoid circular import
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
@@ -931,7 +931,7 @@ async def _deserialize_processed_response(
     mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
     handoffs_map = _build_handoffs_map(current_agent)
 
-    from ._run_impl import (
+    from .run_internal.run_steps import (
         ProcessedResponse,
         ToolRunApplyPatchCall,
         ToolRunComputerAction,
@@ -1426,7 +1426,7 @@ async def _build_run_state_from_json(
             if approval_item is not None:
                 interruptions.append(approval_item)
 
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         state._current_step = NextStepInterruption(
             interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]

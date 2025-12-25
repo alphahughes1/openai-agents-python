@@ -19,17 +19,6 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 
 from agents import Agent, Runner, handoff
-from agents._run_impl import (
-    NextStepInterruption,
-    ProcessedResponse,
-    ToolRunApplyPatchCall,
-    ToolRunComputerAction,
-    ToolRunFunction,
-    ToolRunHandoff,
-    ToolRunLocalShellCall,
-    ToolRunMCPApprovalRequest,
-    ToolRunShellCall,
-)
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -51,6 +40,17 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.run_loop import (
+    NextStepInterruption,
+    ProcessedResponse,
+    ToolRunApplyPatchCall,
+    ToolRunComputerAction,
+    ToolRunFunction,
+    ToolRunHandoff,
+    ToolRunLocalShellCall,
+    ToolRunMCPApprovalRequest,
+    ToolRunShellCall,
+)
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
     RunState,
@@ -1550,7 +1550,7 @@ class TestRunStateResumption:
         state = result.to_state()
 
         # State should have _current_step set to NextStepInterruption
-        from agents._run_impl import NextStepInterruption
+        from agents.run_internal.run_loop import NextStepInterruption
 
         assert state._current_step is not None
         assert isinstance(state._current_step, NextStepInterruption)
