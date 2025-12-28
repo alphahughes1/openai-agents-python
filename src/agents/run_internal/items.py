@@ -46,19 +46,6 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
     not replay stale tool calls.
     """
 
-    def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
-        completed: set[str] = set()
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            item_type = entry.get("type")
-            if item_type not in ("function_call_output", "function_call_result"):
-                continue
-            call_id = entry.get("call_id") or entry.get("callId")
-            if call_id and isinstance(call_id, str):
-                completed.add(call_id)
-        return completed
-
     completed_call_ids = _completed_call_ids(items)
 
     filtered: list[TResponseInputItem] = []
@@ -77,19 +64,7 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
 
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
     """Ensure a single item is normalized for model input (function_call_output, snake_case)."""
-
-    def _coerce_dict(value: TResponseInputItem) -> dict[str, Any] | None:
-        """Convert dataclass/Pydantic items into plain dicts when possible."""
-        if isinstance(value, dict):
-            return dict(value)
-        if hasattr(value, "model_dump"):
-            try:
-                return cast(dict[str, Any], value.model_dump(exclude_unset=True))
-            except Exception:
-                return None
-        return None
-
-    coerced = _coerce_dict(item)
+    coerced = _coerce_to_dict(item)
     if coerced is None:
         return item
 
@@ -99,17 +74,6 @@ def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
 
 def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
     """Normalize input items for API submission and strip provider data for downstream services."""
-
-    def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
-        """Convert model items to dicts so fields can be renamed and sanitized."""
-        if isinstance(value, dict):
-            return dict(value)
-        if hasattr(value, "model_dump"):
-            try:
-                return cast(dict[str, Any], value.model_dump(exclude_unset=True))
-            except Exception:
-                return None
-        return None
 
     normalized: list[TResponseInputItem] = []
     for item in items:
@@ -223,17 +187,33 @@ def extract_mcp_request_id_from_run(mcp_run: Any) -> str | None:
     return candidate if isinstance(candidate, str) else None
 
 
-__all__ = [
-    "REJECTION_MESSAGE",
-    "copy_input_items",
-    "drop_orphan_function_calls",
-    "ensure_input_item_format",
-    "normalize_input_items_for_api",
-    "fingerprint_input_item",
-    "deduplicate_input_items",
-    "function_rejection_item",
-    "shell_rejection_item",
-    "apply_patch_rejection_item",
-    "extract_mcp_request_id",
-    "extract_mcp_request_id_from_run",
-]
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
+    """Return the call ids that already have outputs."""
+    completed: set[str] = set()
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        item_type = entry.get("type")
+        if item_type not in ("function_call_output", "function_call_result"):
+            continue
+        call_id = entry.get("call_id") or entry.get("callId")
+        if call_id and isinstance(call_id, str):
+            completed.add(call_id)
+    return completed
+
+
+def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+    """Convert model items to dicts so fields can be renamed and sanitized."""
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "model_dump"):
+        try:
+            return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+        except Exception:
+            return None
+    return None

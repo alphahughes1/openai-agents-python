@@ -161,7 +161,7 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
         pending_safety_checks=[],
         status="completed",
     )
-    screenshot_output = await ComputerAction._get_screenshot_sync(computer, tool_call)
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     # The last call is always to screenshot()
     if isinstance(action, ActionScreenshot):
         # Screenshot is taken twice: initial explicit call plus final capture.
@@ -208,7 +208,7 @@ async def test_get_screenshot_async_executes_action_and_takes_screenshot(
         pending_safety_checks=[],
         status="completed",
     )
-    screenshot_output = await ComputerAction._get_screenshot_async(computer, tool_call)
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     if isinstance(action, ActionScreenshot):
         assert computer.calls == [("screenshot", ()), ("screenshot", ())]
     else:

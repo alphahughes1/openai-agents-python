@@ -85,57 +85,19 @@ async def prepare_input_with_session(
         if not isinstance(combined, list):
             raise UserError("Session input callback must return a list of input items.")
 
-        def session_item_key(item: Any) -> str:
-            try:
-                if hasattr(item, "model_dump"):
-                    payload = item.model_dump(exclude_unset=True)
-                elif isinstance(item, dict):
-                    payload = item
-                else:
-                    payload = ensure_input_item_format(item)
-                return json.dumps(payload, sort_keys=True, default=str)
-            except Exception:
-                return repr(item)
-
-        def build_reference_map(items: Sequence[Any]) -> dict[str, list[Any]]:
-            refs: dict[str, list[Any]] = {}
-            for item in items:
-                key = session_item_key(item)
-                refs.setdefault(key, []).append(item)
-            return refs
-
-        def consume_reference(ref_map: dict[str, list[Any]], key: str, candidate: Any) -> bool:
-            candidates = ref_map.get(key)
-            if not candidates:
-                return False
-            for idx, existing in enumerate(candidates):
-                if existing is candidate:
-                    candidates.pop(idx)
-                    if not candidates:
-                        ref_map.pop(key, None)
-                    return True
-            return False
-
-        def build_frequency_map(items: Sequence[Any]) -> dict[str, int]:
-            freq: dict[str, int] = {}
-            for item in items:
-                key = session_item_key(item)
-                freq[key] = freq.get(key, 0) + 1
-            return freq
-
-        history_refs = build_reference_map(history_for_callback)
-        new_refs = build_reference_map(new_items_for_callback)
-        history_counts = build_frequency_map(history_for_callback)
-        new_counts = build_frequency_map(new_items_for_callback)
+        history_refs = _build_reference_map(history_for_callback)
+        new_refs = _build_reference_map(new_items_for_callback)
+        history_counts = _build_frequency_map(history_for_callback)
+        new_counts = _build_frequency_map(new_items_for_callback)
 
         appended: list[Any] = []
         for item in combined:
-            key = session_item_key(item)
-            if consume_reference(new_refs, key, item):
+            key = _session_item_key(item)
+            if _consume_reference(new_refs, key, item):
                 new_counts[key] = max(new_counts.get(key, 0) - 1, 0)
                 appended.append(item)
                 continue
-            if consume_reference(history_refs, key, item):
+            if _consume_reference(history_refs, key, item):
                 history_counts[key] = max(history_counts.get(key, 0) - 1, 0)
                 continue
             if history_counts.get(key, 0) > 0:
@@ -440,3 +402,54 @@ async def wait_for_session_cleanup(
     logger.debug(
         "Session cleanup verification exhausted attempts; targets may still linger temporarily"
     )
+
+
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _session_item_key(item: Any) -> str:
+    """Return a stable representation of a session item for comparison."""
+    try:
+        if hasattr(item, "model_dump"):
+            payload = item.model_dump(exclude_unset=True)
+        elif isinstance(item, dict):
+            payload = item
+        else:
+            payload = ensure_input_item_format(item)
+        return json.dumps(payload, sort_keys=True, default=str)
+    except Exception:
+        return repr(item)
+
+
+def _build_reference_map(items: Sequence[Any]) -> dict[str, list[Any]]:
+    """Map serialized keys to the concrete session items used to build them."""
+    refs: dict[str, list[Any]] = {}
+    for item in items:
+        key = _session_item_key(item)
+        refs.setdefault(key, []).append(item)
+    return refs
+
+
+def _consume_reference(ref_map: dict[str, list[Any]], key: str, candidate: Any) -> bool:
+    """Remove a specific candidate from a reference map when it is consumed."""
+    candidates = ref_map.get(key)
+    if not candidates:
+        return False
+    for idx, existing in enumerate(candidates):
+        if existing is candidate:
+            candidates.pop(idx)
+            if not candidates:
+                ref_map.pop(key, None)
+            return True
+    return False
+
+
+def _build_frequency_map(items: Sequence[Any]) -> dict[str, int]:
+    """Count how many times each serialized key appears in a collection."""
+    freq: dict[str, int] = {}
+    for item in items:
+        key = _session_item_key(item)
+        freq[key] = freq.get(key, 0) + 1
+    return freq

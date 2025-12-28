@@ -90,11 +90,6 @@ class ComputerAction:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         computer = await resolve_computer(tool=action.computer_tool, run_context=context_wrapper)
         agent_hooks = agent.hooks
-        output_func = (
-            cls._get_screenshot_async(computer, action.tool_call)
-            if hasattr(computer, "screenshot_async")
-            else cls._get_screenshot_sync(computer, action.tool_call)
-        )
         await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
             (
@@ -104,7 +99,7 @@ class ComputerAction:
             ),
         )
 
-        output = await output_func
+        output = await cls._execute_action_and_capture(computer, action.tool_call)
 
         await asyncio.gather(
             hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
@@ -131,62 +126,40 @@ class ComputerAction:
         )
 
     @classmethod
-    async def _get_screenshot_sync(
-        cls,
-        computer: Any,
-        tool_call: ResponseComputerToolCall,
+    async def _execute_action_and_capture(
+        cls, computer: Any, tool_call: ResponseComputerToolCall
     ) -> str:
-        """Execute the computer action for sync drivers and return the screenshot."""
+        """Execute the computer action (sync or async drivers) and return the screenshot."""
+
+        async def maybe_call(method_name: str, *args: Any) -> Any:
+            method = getattr(computer, method_name, None)
+            if method is None or not callable(method):
+                raise ModelBehaviorError(f"Computer driver missing method {method_name}")
+            result = method(*args)
+            return await result if inspect.isawaitable(result) else result
+
         action = tool_call.action
         if isinstance(action, ActionClick):
-            computer.click(action.x, action.y, action.button)
+            await maybe_call("click", action.x, action.y, action.button)
         elif isinstance(action, ActionDoubleClick):
-            computer.double_click(action.x, action.y)
+            await maybe_call("double_click", action.x, action.y)
         elif isinstance(action, ActionDrag):
-            computer.drag([(p.x, p.y) for p in action.path])
+            await maybe_call("drag", [(p.x, p.y) for p in action.path])
         elif isinstance(action, ActionKeypress):
-            computer.keypress(action.keys)
+            await maybe_call("keypress", action.keys)
         elif isinstance(action, ActionMove):
-            computer.move(action.x, action.y)
+            await maybe_call("move", action.x, action.y)
         elif isinstance(action, ActionScreenshot):
-            computer.screenshot()
+            await maybe_call("screenshot")
         elif isinstance(action, ActionScroll):
-            computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
+            await maybe_call("scroll", action.x, action.y, action.scroll_x, action.scroll_y)
         elif isinstance(action, ActionType):
-            computer.type(action.text)
+            await maybe_call("type", action.text)
         elif isinstance(action, ActionWait):
-            computer.wait()
+            await maybe_call("wait")
 
-        return cast(str, computer.screenshot())
-
-    @classmethod
-    async def _get_screenshot_async(
-        cls,
-        computer: Any,
-        tool_call: ResponseComputerToolCall,
-    ) -> str:
-        """Execute the computer action for async drivers and return the screenshot."""
-        action = tool_call.action
-        if isinstance(action, ActionClick):
-            await computer.click(action.x, action.y, action.button)
-        elif isinstance(action, ActionDoubleClick):
-            await computer.double_click(action.x, action.y)
-        elif isinstance(action, ActionDrag):
-            await computer.drag([(p.x, p.y) for p in action.path])
-        elif isinstance(action, ActionKeypress):
-            await computer.keypress(action.keys)
-        elif isinstance(action, ActionMove):
-            await computer.move(action.x, action.y)
-        elif isinstance(action, ActionScreenshot):
-            await computer.screenshot()
-        elif isinstance(action, ActionScroll):
-            await computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
-        elif isinstance(action, ActionType):
-            await computer.type(action.text)
-        elif isinstance(action, ActionWait):
-            await computer.wait()
-
-        return cast(str, await computer.screenshot())
+        screenshot_result = await maybe_call("screenshot")
+        return cast(str, screenshot_result)
 
 
 class LocalShellAction:
