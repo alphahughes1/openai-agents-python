@@ -29,6 +29,7 @@ from .oai_conversation import OpenAIServerConversationTracker
 
 __all__ = [
     "prepare_input_with_session",
+    "persist_session_items_for_guardrail_trip",
     "save_result_to_session",
     "rewind_session_items",
     "wait_for_session_cleanup",
@@ -161,6 +162,30 @@ async def prepare_input_with_session(
     deduplicated = deduplicate_input_items(normalized)
 
     return deduplicated, [ensure_input_item_format(item) for item in appended_items]
+
+
+async def persist_session_items_for_guardrail_trip(
+    session: Session | None,
+    server_conversation_tracker: OpenAIServerConversationTracker | None,
+    session_input_items_for_persistence: list[TResponseInputItem] | None,
+    original_user_input: str | list[TResponseInputItem] | None,
+    run_state: RunState | None,
+) -> list[TResponseInputItem] | None:
+    """
+    Persist input items when a guardrail tripwire is triggered.
+    """
+    if session is None or server_conversation_tracker is not None:
+        return session_input_items_for_persistence
+
+    updated_session_input_items = session_input_items_for_persistence
+    if updated_session_input_items is None and original_user_input is not None:
+        updated_session_input_items = ItemHelpers.input_to_new_input_list(original_user_input)
+
+    input_items_for_save: list[TResponseInputItem] = (
+        updated_session_input_items if updated_session_input_items is not None else []
+    )
+    await save_result_to_session(session, input_items_for_save, [], run_state)
+    return updated_session_input_items
 
 
 async def save_result_to_session(

@@ -68,6 +68,7 @@ from .run_internal.run_steps import (
     SingleStepResult,
 )
 from .run_internal.session_persistence import (
+    persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     save_result_to_session,
 )
@@ -439,6 +440,7 @@ class AgentRunner:
             )
         else:
             server_conversation_tracker = None
+        session_persistence_enabled = session is not None and server_conversation_tracker is None
 
         if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
             session_items: list[TResponseInputItem] | None = None
@@ -510,7 +512,7 @@ class AgentRunner:
 
             if (
                 not is_resumed_state
-                and server_conversation_tracker is None
+                and session_persistence_enabled
                 and original_user_input is not None
                 and session_input_items_for_persistence is None
             ):
@@ -518,21 +520,25 @@ class AgentRunner:
                     original_user_input
                 )
 
-            if (
-                session is not None
-                and server_conversation_tracker is None
-                and session_input_items_for_persistence
-            ):
+            if session_persistence_enabled and session_input_items_for_persistence:
                 # Capture the exact input saved so it can be rewound on conversation lock retries.
                 last_saved_input_snapshot_for_rewind = list(session_input_items_for_persistence)
                 await save_result_to_session(
-                    session, session_input_items_for_persistence, [], run_state
+                    session,
+                    session_input_items_for_persistence,
+                    [],
+                    run_state,
                 )
                 session_input_items_for_persistence = []
 
             try:
                 while True:
                     resuming_turn = is_resumed_state
+                    normalized_starting_input: str | list[TResponseInputItem] = (
+                        starting_input
+                        if starting_input is not None and not isinstance(starting_input, RunState)
+                        else ""
+                    )
                     if run_state is not None and run_state._current_step is not None:
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
@@ -575,11 +581,7 @@ class AgentRunner:
                             run_state._generated_items = generated_items
                             run_state._current_step = turn_result.next_step  # type: ignore[assignment]
 
-                            if (
-                                session is not None
-                                and server_conversation_tracker is None
-                                and turn_result.new_step_items
-                            ):
+                            if session_persistence_enabled and turn_result.new_step_items:
                                 persisted_before_partial = (
                                     run_state._current_turn_persisted_item_count
                                     if run_state is not None
@@ -595,10 +597,7 @@ class AgentRunner:
 
                             if isinstance(turn_result.next_step, NextStepInterruption):
                                 interruption_result_input: str | list[TResponseInputItem] = (
-                                    starting_input
-                                    if starting_input is not None
-                                    and not isinstance(starting_input, RunState)
-                                    else ""
+                                    normalized_starting_input
                                 )
                                 if not model_responses or (
                                     model_responses[-1] is not turn_result.model_response
@@ -694,7 +693,7 @@ class AgentRunner:
                                     max_turns=max_turns,
                                 )
                                 result._current_turn = current_turn
-                                if server_conversation_tracker is None:
+                                if session_persistence_enabled:
                                     input_items_for_save_1: list[TResponseInputItem] = (
                                         session_input_items_for_persistence
                                         if session_input_items_for_persistence is not None
@@ -760,7 +759,7 @@ class AgentRunner:
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
 
-                    if session is not None and server_conversation_tracker is None:
+                    if session_persistence_enabled:
                         try:
                             last_saved_input_snapshot_for_rewind = (
                                 ItemHelpers.input_to_new_input_list(original_input)
@@ -772,6 +771,9 @@ class AgentRunner:
                         pending_server_items
                         if server_conversation_tracker is not None and pending_server_items
                         else generated_items
+                    )
+                    starting_input_for_turn: str | list[TResponseInputItem] = (
+                        normalized_starting_input
                     )
 
                     if current_turn <= 1:
@@ -793,21 +795,15 @@ class AgentRunner:
                                     context_wrapper,
                                 )
                         except InputGuardrailTripwireTriggered:
-                            if session is not None and server_conversation_tracker is None:
-                                if session_input_items_for_persistence is None and (
-                                    original_user_input is not None
-                                ):
-                                    session_input_items_for_persistence = (
-                                        ItemHelpers.input_to_new_input_list(original_user_input)
-                                    )
-                                input_items_for_save: list[TResponseInputItem] = (
-                                    session_input_items_for_persistence
-                                    if session_input_items_for_persistence is not None
-                                    else []
+                            session_input_items_for_persistence = (
+                                await persist_session_items_for_guardrail_trip(
+                                    session,
+                                    server_conversation_tracker,
+                                    session_input_items_for_persistence,
+                                    original_user_input,
+                                    run_state,
                                 )
-                                await save_result_to_session(
-                                    session, input_items_for_save, [], run_state
-                                )
+                            )
                             raise
 
                         parallel_results: list[InputGuardrailResult] = []
@@ -826,12 +822,6 @@ class AgentRunner:
                                 )
                             )
 
-                        starting_input_for_turn: str | list[TResponseInputItem] = (
-                            starting_input
-                            if starting_input is not None
-                            and not isinstance(starting_input, RunState)
-                            else ""
-                        )
                         model_task = asyncio.create_task(
                             run_single_turn(
                                 agent=current_agent,
@@ -849,7 +839,7 @@ class AgentRunner:
                                 session=session,
                                 session_items_to_rewind=(
                                     last_saved_input_snapshot_for_rewind
-                                    if not is_resumed_state and server_conversation_tracker is None
+                                    if not is_resumed_state and session_persistence_enabled
                                     else None
                                 ),
                             )
@@ -867,23 +857,15 @@ class AgentRunner:
                                 except InputGuardrailTripwireTriggered:
                                     model_task.cancel()
                                     await asyncio.gather(model_task, return_exceptions=True)
-                                    if session is not None and server_conversation_tracker is None:
-                                        if session_input_items_for_persistence is None and (
-                                            original_user_input is not None
-                                        ):
-                                            session_input_items_for_persistence = (
-                                                ItemHelpers.input_to_new_input_list(
-                                                    original_user_input
-                                                )
-                                            )
-                                        input_items_for_save_guardrail: list[TResponseInputItem] = (
-                                            session_input_items_for_persistence
-                                            if session_input_items_for_persistence is not None
-                                            else []
+                                    session_input_items_for_persistence = (
+                                        await persist_session_items_for_guardrail_trip(
+                                            session,
+                                            server_conversation_tracker,
+                                            session_input_items_for_persistence,
+                                            original_user_input,
+                                            run_state,
                                         )
-                                        await save_result_to_session(
-                                            session, input_items_for_save_guardrail, [], run_state
-                                        )
+                                    )
                                     raise
                                 turn_result = await model_task
                             else:
@@ -891,42 +873,26 @@ class AgentRunner:
                                 try:
                                     parallel_results = await parallel_guardrail_task
                                 except InputGuardrailTripwireTriggered:
-                                    if session is not None and server_conversation_tracker is None:
-                                        if session_input_items_for_persistence is None and (
-                                            original_user_input is not None
-                                        ):
-                                            session_input_items_for_persistence = (
-                                                ItemHelpers.input_to_new_input_list(
-                                                    original_user_input
-                                                )
-                                            )
-                                        input_items_for_save_guardrail2: list[
-                                            TResponseInputItem
-                                        ] = (
-                                            session_input_items_for_persistence
-                                            if session_input_items_for_persistence is not None
-                                            else []
+                                    session_input_items_for_persistence = (
+                                        await persist_session_items_for_guardrail_trip(
+                                            session,
+                                            server_conversation_tracker,
+                                            session_input_items_for_persistence,
+                                            original_user_input,
+                                            run_state,
                                         )
-                                        await save_result_to_session(
-                                            session, input_items_for_save_guardrail2, [], run_state
-                                        )
+                                    )
                                     raise
                         else:
                             turn_result = await model_task
 
                         input_guardrail_results = sequential_results + parallel_results
                     else:
-                        starting_input_for_turn2: str | list[TResponseInputItem] = (
-                            starting_input
-                            if starting_input is not None
-                            and not isinstance(starting_input, RunState)
-                            else ""
-                        )
                         turn_result = await run_single_turn(
                             agent=current_agent,
                             all_tools=all_tools,
                             original_input=original_input,
-                            starting_input=starting_input_for_turn2,
+                            starting_input=starting_input_for_turn,
                             generated_items=items_for_model,
                             hooks=hooks,
                             context_wrapper=context_wrapper,
@@ -938,7 +904,7 @@ class AgentRunner:
                             session=session,
                             session_items_to_rewind=(
                                 last_saved_input_snapshot_for_rewind
-                                if not is_resumed_state and server_conversation_tracker is None
+                                if not is_resumed_state and session_persistence_enabled
                                 else None
                             ),
                         )
@@ -952,8 +918,6 @@ class AgentRunner:
                     generated_items = turn_result.generated_items
                     if server_conversation_tracker is not None:
                         pending_server_items = list(turn_result.new_step_items)
-
-                    if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
@@ -970,7 +934,7 @@ class AgentRunner:
                             items_to_save_turn = [
                                 item for item in items_to_save_turn if item.type != "tool_call_item"
                             ]
-                        if server_conversation_tracker is None and session is not None:
+                        if session_persistence_enabled:
                             output_call_ids = {
                                 item.raw_item.get("call_id")
                                 if isinstance(item.raw_item, dict)
@@ -1028,10 +992,7 @@ class AgentRunner:
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (
-                                starting_input
-                                if starting_input is not None
-                                and not isinstance(starting_input, RunState)
-                                else ""
+                                normalized_starting_input
                             )
                             result = RunResult(
                                 input=final_output_result_input,
@@ -1058,7 +1019,7 @@ class AgentRunner:
                             result._original_input = copy_input_items(original_input)
                             return result
                         elif isinstance(turn_result.next_step, NextStepInterruption):
-                            if session is not None and server_conversation_tracker is None:
+                            if session_persistence_enabled:
                                 if not any(
                                     guardrail_result.output.tripwire_triggered
                                     for guardrail_result in input_guardrail_results
@@ -1084,10 +1045,7 @@ class AgentRunner:
                                 run_state._last_processed_response = turn_result.processed_response
                             # Ensure starting_input is not None and not RunState
                             interruption_result_input2: str | list[TResponseInputItem] = (
-                                starting_input
-                                if starting_input is not None
-                                and not isinstance(starting_input, RunState)
-                                else ""
+                                normalized_starting_input
                             )
                             result = RunResult(
                                 input=interruption_result_input2,
@@ -1367,7 +1325,6 @@ class AgentRunner:
         )
         output_schema = get_output_schema(schema_agent)
 
-        # Ensure starting_input is not None and not RunState
         streamed_input: str | list[TResponseInputItem] = (
             starting_input
             if starting_input is not None and not isinstance(starting_input, RunState)
